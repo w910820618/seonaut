@@ -1,0 +1,40 @@
+# Dockerfile for Railway deployments.
+# Same build as ./Dockerfile, but without BuildKit cache mounts (Railway requires
+# service-specific cache ids) and without the docker-compose wait helper.
+FROM golang:1.25-alpine3.22 AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o seonaut cmd/server/main.go
+
+FROM node:18-alpine3.18 AS front
+
+WORKDIR /home/node
+COPY ./web ./app/web
+
+RUN npm install --save-exact esbuild && \
+	./node_modules/esbuild/bin/esbuild ./app/web/css/style.css \
+	--bundle \
+	--minify \
+	--outdir=./app/web/static \
+	--public-path=/resources \
+	--loader:.woff=file \
+	--loader:.woff2=file
+
+FROM alpine:latest AS production
+
+COPY --from=builder /app/seonaut /app/seonaut
+COPY --from=front /home/node/app /app/
+
+COPY ./translations /app/translations
+COPY ./migrations /app/migrations
+COPY ./config /app/config
+
+WORKDIR /app
+
+# Map Railway's injected variables onto SEONAUT_* config overrides.
+# PORT -> server port; RAILWAY_PUBLIC_DOMAIN -> server url (needed by the crawl websocket origin check).
+# Explicitly set SEONAUT_* variables always win.
+CMD ["sh", "-c", "export SEONAUT_SERVER_PORT=${SEONAUT_SERVER_PORT:-${PORT:-9000}}; if [ -z \"$SEONAUT_SERVER_URL\" ] && [ -n \"$RAILWAY_PUBLIC_DOMAIN\" ]; then export SEONAUT_SERVER_URL=https://$RAILWAY_PUBLIC_DOMAIN; fi; exec /app/seonaut"]
